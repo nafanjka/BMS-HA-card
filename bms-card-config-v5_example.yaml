@@ -1,0 +1,171 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# BMS Battery Card v5 — Example / Starter Configuration
+#
+# Copy this block into your Lovelace dashboard via the raw YAML editor.
+# Replace every  sensor.your_*  /  switch.your_*  /  binary_sensor.your_*  /
+# button.your_*  placeholder with the actual entity IDs from your HA instance.
+#
+# All entities under the "entities:" key are optional.
+# The card gracefully hides any section whose entities are not configured.
+# ─────────────────────────────────────────────────────────────────────────────
+
+type: custom:bms-battery-card-v5   # must match the registered resource filename
+
+title: My Battery                  # text shown in the card header — change freely
+
+# ── Cell configuration ────────────────────────────────────────────────────────
+cellCount: 4          # number of cells in your pack — renders that many 3-D cell tubes
+                      # typical values: 4 (12 V pack), 8 (24 V pack), 16 (48 V pack)
+
+minCellVoltage: 3.0   # V — the voltage at which a cell is considered fully empty
+                      # LiFePO4 typical: 3.0 V
+maxCellVoltage: 3.45  # V — the voltage at which a cell is considered fully charged
+                      # LiFePO4 typical: 3.45–3.55 V (check your BMS spec)
+lowVoltageThreshold: 3.1  # V — below this the cell liquid turns blood-red as a warning
+                           # set slightly above your BMS's undervoltage protection point
+
+# ── Connection health ─────────────────────────────────────────────────────────
+staleTimeout: 15      # seconds — if NO entity value changes within this window,
+                      # the card switches to "inactive" state:
+                      #   • SOC gauge turns greyscale
+                      #   • Status pill shows  ⚪ Inactive
+                      #   • Connection dot blinks red / shows "Connection Lost"
+                      #   • Power-flow section dims out
+                      # Recommended values:
+                      #   15  — BMS sends updates frequently (every few seconds)
+                      #   60  — BMS only updates on change (idle battery may not change)
+                      #   120 — very slow MQTT broker or polling integration
+
+# ── Auto-reset defaults (cross-device sync) ───────────────────────────────────
+# These YAML values are the cross-device fallback — they are applied on any
+# browser/device where the user has not yet interacted with the AUTO button.
+# Once a user toggles AUTO via the card UI, their device preference is saved
+# server-side via HA's frontend storage and YAML values are no longer used.
+autoResetEnabled: false      # true = AUTO reset active on all devices by default
+autoResetPeriod: daily       # daily | weekly | monthly
+                             # only has effect when autoResetEnabled is true
+
+# ── Wave animation tuning ─────────────────────────────────────────────────────
+waveSpeed: 0.009          # px/ms — base liquid wave scroll speed inside cell tubes
+                          # lower = slower slosh (0.005), higher = faster (0.015)
+waveSpeedVariation: 1     # 0–1 — spread of speeds across cells
+                          # 0 = all identical, 1 = maximum variation (most natural look)
+waveReverseRatio: 0.5     # 0–1 — fraction of cells that scroll in the opposite direction
+                          # 0.5 = half cells go left, half go right (parallax turbulence)
+
+# ── Power flow animation ──────────────────────────────────────────────────────
+maxFlowPower: 1000        # W — your system's rated peak power
+                          # the comet-trail orbs move at maximum speed at this wattage
+                          # set to your inverter / charger's nominal output (e.g. 1000, 3000, 5000)
+
+# ── Entity mapping ────────────────────────────────────────────────────────────
+# Replace each placeholder with the real entity_id from your HA instance.
+# Find entity IDs in: Settings → Devices & Services → your BMS integration
+# or in Developer Tools → States (search for your BMS name).
+entities:
+
+  # ── Core readings (the most important — fill these first) ──────────────────
+  state_of_charge: sensor.your_bms_soc
+    # % — state of charge; drives the large arc gauge and all SOC displays
+
+  total_voltage: sensor.your_bms_total_voltage
+    # V — total pack voltage shown in the Voltage stat tile
+
+  current: sensor.your_bms_current
+    # A — pack current; positive = charging, negative = discharging
+    # drives the status pill, CHARGING badge and power-flow direction
+
+  power: sensor.your_bms_battery_power
+    # W — battery power; used to calculate charger/load watts and flow animation speed
+
+  capacity_remaining: sensor.your_bms_remain_capacity
+    # Ah — remaining capacity shown inside the gauge and in the Remaining tile
+
+  average_cell_voltage: sensor.your_bms_average_cell_voltage
+    # V — pack average cell voltage; shown in the footer and used to calculate
+    # per-cell deviation (the ±mV diff shown under each 3-D cell tube)
+
+  # ── Individual cell voltages ───────────────────────────────────────────────
+  # Add one entry per cell. Count must match cellCount above.
+  # Remove lines for cells you don't have (e.g. remove 5–16 for a 4-cell pack).
+  cell_voltage_1: sensor.your_bms_cell_voltage_01
+  cell_voltage_2: sensor.your_bms_cell_voltage_02
+  cell_voltage_3: sensor.your_bms_cell_voltage_03
+  cell_voltage_4: sensor.your_bms_cell_voltage_04
+  # cell_voltage_5: sensor.your_bms_cell_voltage_05   # uncomment for 8+ cell packs
+  # cell_voltage_6: sensor.your_bms_cell_voltage_06
+  # cell_voltage_7: sensor.your_bms_cell_voltage_07
+  # cell_voltage_8: sensor.your_bms_cell_voltage_08
+
+  # ── Cell voltage statistics ────────────────────────────────────────────────
+  delta_cell_voltage: sensor.your_bms_cells_voltage_diff
+    # V — max minus min cell voltage; shown as the ΔV badge above the cell grid
+    # badge turns orange above 20 mV, red above 50 mV
+
+  min_voltage_cell: sensor.your_bms_cell_voltage_min
+    # V — lowest cell; gets a red ▼ marker and red glow border
+
+  max_voltage_cell: sensor.your_bms_cell_voltage_max
+    # V — highest cell; gets a green ▲ marker and green glow border
+
+  # ── Temperature sensors ────────────────────────────────────────────────────
+  # Include only the probes your BMS actually reports. Missing ones are hidden.
+  temperature_sensor_1: sensor.your_bms_battery_temp_1   # °C — battery probe 1
+  temperature_sensor_2: sensor.your_bms_battery_temp_2   # °C — battery probe 2
+  # temperature_sensor_3: sensor.your_bms_battery_temp_3  # uncomment if available
+  # temperature_sensor_4: sensor.your_bms_battery_temp_4  # uncomment if available
+  power_tube_temperature: sensor.your_bms_mosfet_temp    # °C — MOSFET / power tube
+
+  # ── Switches ──────────────────────────────────────────────────────────────
+  # Tapping the Charge / Discharge chip in the card calls toggle on these entities.
+  charging: switch.your_bms_charge_switch       # enables / disables charging MOSFET
+  discharging: switch.your_bms_discharge_switch # enables / disables discharge MOSFET
+
+  # ── Binary sensors ────────────────────────────────────────────────────────
+  balancer: binary_sensor.your_bms_balancer_state
+    # on = active cell balancing; lights the purple Balance indicator
+
+  charging_mosfet_state: binary_sensor.your_bms_charging_state
+    # on = CHG FET conducting (amber chip); off = tripped (red chip)
+
+  discharging_mosfet_state: binary_sensor.your_bms_discharge_state
+    # on = DIS FET conducting (violet chip); off = tripped (red chip)
+
+  # ── Time ──────────────────────────────────────────────────────────────────
+  time_left: sensor.your_bms_time_left
+    # decimal hours to full charge or empty; auto-formatted to "3h 20m", "1d 4h" etc.
+
+  # ── Energy counters ────────────────────────────────────────────────────────
+  # Shown in the footer. Manual Reset and Auto Reset both press energy_clear_btn.
+  energy_in: sensor.your_bms_energy_in           # kWh cumulative energy into battery
+  energy_out: sensor.your_bms_energy_out         # kWh cumulative energy out of battery
+  energy_clear_btn: button.your_bms_energy_clear
+    # HA button that resets the BMS energy counters
+    # REQUIRED for Manual Reset (long-press) and Auto Reset to work
+
+  # ── Battery statistics ─────────────────────────────────────────────────────
+  charging_cycles: sensor.your_bms_cycle_count
+    # integer — total completed charge cycles; shown in the footer
+
+  total_runtime_formatted: sensor.your_bms_work_time
+    # decimal days — total BMS operating time; auto-formatted to "23d 4h"
+
+  total_battery_capacity_setting: sensor.your_bms_battery_capacity
+    # Ah — nominal capacity programmed in the BMS; shown next to remaining in gauge
+
+  total_charging_cycle_capacity: sensor.your_bms_cycle_capacity
+    # Ah — cumulative capacity cycled through the battery lifetime
+
+  # ── Alarms / warnings ─────────────────────────────────────────────────────
+  errors: sensor.your_bms_warning_msg
+    # string — any value other than "normal", "none", "ok", "0" or empty
+    # triggers the red alert bar at the bottom of the card
+
+# ── Dashboard grid ────────────────────────────────────────────────────────────
+grid_options:
+  columns: 12   # card width in Lovelace grid units — adjust to taste
+                # 12  = half-width on a 24-column grid, full-width on a 12-column grid
+                # 18  = ¾ width on a 24-column grid
+                # 24  = full-width on a 24-column grid
+                # The card layout adapts automatically via CSS container queries
+  rows: auto    # height is determined by content — do not change

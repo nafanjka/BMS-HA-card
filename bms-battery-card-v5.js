@@ -641,15 +641,15 @@ class BmsBatteryCardV5 extends HTMLElement {
 
     /* ── CHARGING corner badge ── */
     .charging-badge {
-      display:none; position:absolute; top:14px; right:14px; z-index:20;
-      padding:5px 13px; border-radius:20px;
+      display:none;
+      padding:6px 16px; border-radius:20px;
       background:rgba(0,180,255,0.13); border:1px solid rgba(64,196,255,0.55);
-      color:#40c4ff; font-size:10px; font-weight:800;
-      letter-spacing:1.8px; text-transform:uppercase;
-      pointer-events:none;
+      color:#40c4ff; font-size:12px; font-weight:700;
+      letter-spacing:.6px; text-transform:uppercase;
+      white-space:nowrap;
       animation:chargingBadgePulse 2.2s ease-in-out infinite;
     }
-    .charging-badge.visible { display:block; }
+    .charging-badge.visible { display:flex; align-items:center; }
 
     /* Accent bar */
     .accent {
@@ -1000,8 +1000,7 @@ class BmsBatteryCardV5 extends HTMLElement {
 
       /* Header */
       .t-h2 { font-size:13px; }
-      .pill { padding:4px 8px; font-size:9px; letter-spacing:.3px; }
-      .charging-badge { font-size:8px; padding:3px 8px; top:10px; right:10px; }
+      .pill, .charging-badge { padding:4px 8px; font-size:9px; letter-spacing:.3px; }
 
       /* Hero — stacked, compact gauge */
       .hero { grid-template-columns:1fr; gap:10px; }
@@ -1047,8 +1046,7 @@ class BmsBatteryCardV5 extends HTMLElement {
       .inner { padding:12px 12px 14px; }
 
       /* Header */
-      .pill { padding:5px 11px; font-size:10px; }
-      .charging-badge { font-size:9px; padding:4px 9px; }
+      .pill, .charging-badge { padding:5px 11px; font-size:10px; }
 
       /* Hero — stacked, medium gauge */
       .hero { grid-template-columns:1fr; gap:12px; }
@@ -1202,7 +1200,6 @@ class BmsBatteryCardV5 extends HTMLElement {
     </div>` : '';
 
     return `
-      <div class="charging-badge" id="charging-badge">⚡ CHARGING</div>
       <div class="accent" id="accent"></div>
       <div class="inner">
 
@@ -1214,6 +1211,7 @@ class BmsBatteryCardV5 extends HTMLElement {
               <div class="t-sub" id="conn-label">JK BMS <span id="conn-dot" class="conn-dot live">●</span><span id="conn-txt"> Live</span></div>
             </div>
           </div>
+          <div class="charging-badge" id="charging-badge">⚡ CHARGING</div>
           <div class="pill pill-idle" id="status-pill">⏸ Idle</div>
         </div>
 
@@ -1424,9 +1422,14 @@ class BmsBatteryCardV5 extends HTMLElement {
 
     const pill = this._q('status-pill');
     if (pill) {
-      if (isStale)          { pill.textContent = '⚪ Inactive';    pill.setAttribute('class','pill pill-stale'); }
-      else if (discharging) { pill.textContent = '🔌 Discharging'; pill.setAttribute('class','pill pill-dis'); }
-      else                  { pill.textContent = '⏸ Idle';        pill.setAttribute('class','pill pill-idle'); }
+      if (charging) {
+        pill.style.display = 'none';
+      } else {
+        pill.style.display = '';
+        if (isStale)          { pill.textContent = '⚪ Inactive';    pill.setAttribute('class','pill pill-stale'); }
+        else if (discharging) { pill.textContent = '🔌 Discharging'; pill.setAttribute('class','pill pill-dis'); }
+        else                  { pill.textContent = '⏸ Idle';        pill.setAttribute('class','pill pill-idle'); }
+      }
     }
     const accent = this._q('accent');
     if (accent) accent.setAttribute('class', 'accent'+(isStale?' stale':charging?' chg':discharging?' dis':''));

@@ -6,40 +6,6 @@
 
 ---
 
-## What it looks like
-
-```
-┌─────────────────────────────────────────────────────────┐
-│ 🔋 My Battery          JK BMS ● Live       ⚡ CHARGING  │
-│ ─────────────────── gradient accent bar ─────────────── │
-│                                                         │
-│  ╭──── SOC gauge ────╮   🔌 Voltage   ⚡ Current        │
-│  │       87%         │   53.2 V       +14.3 A           │
-│  │   410.5 / 472 Ah  │   🔋 Remaining  ⏱ Time Left     │
-│  │    ⏱ 3h 20m       │   410.5 Ah     3h 20m           │
-│  ╰───────────────────╯   [CHG FET ON ] [DIS FET ON ]   │
-│                                                         │
-│  ⚡ Power Flow                                          │
-│  ☀ 750W  ──●●●──▶  🔋 87%  ──●●●──▶  🏠 0W            │
-│                                                         │
-│  🔬 Cell Voltages                          ΔV 2.1 mV   │
-│  [C1▲] [C2 ] [C3 ] [C4 ] [C5 ] [C6 ] [C7 ] [C8▼]     │
-│  3.325  3.322 3.324 3.321 3.323 3.322 3.325 3.320      │
-│                                                         │
-│  🌡️ Temperature                                         │
-│  [Bat1 24°] [Bat2 25°] [Bat3 24°] [Bat4 23°] [MOS 31°]│
-│                                                         │
-│  ⚡ Charge  🔌 Discharge  ◉ Balance                     │
-│  ─────────────────────────────────────────────────────  │
-│  🔄 12    ⏱ 23d 4h   ⚡ 3.322V   🔋 14820 Ah           │
-│  ⬇ Energy In: 1.842 kWh   ⬆ Energy Out: 0.317 kWh     │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │ Auto reset period…  ▼  │  AUTO  │ ⟳ Manual Reset │  │
-│  └──────────────────────────────────────────────────┘  │
-│  ● All systems OK                                       │
-└─────────────────────────────────────────────────────────┘
-```
-
 <img width="528" height="833" alt="image" src="https://github.com/user-attachments/assets/fcdfa9d3-8429-490c-98d9-d3a9a1d2a3a5" />
 <img width="529" height="556" alt="image" src="https://github.com/user-attachments/assets/d80a858e-a8b6-445f-b528-d6b40ace793e" />
 

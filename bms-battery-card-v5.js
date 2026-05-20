@@ -679,7 +679,6 @@ class BmsBatteryCardV5 extends HTMLElement {
     .t-sub { font-size:10px; color:var(--txt3); text-transform:uppercase; letter-spacing:1.2px; margin-top:1px; }
     .pill { padding:6px 16px; border-radius:20px; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.6px; white-space:nowrap; border:1px solid; transition:all .4s; }
     .pill-idle { color:var(--txt2); background:rgba(51,65,85,.5);  border-color:rgba(100,116,139,.3); }
-    .pill-chg  { color:#ef5350;    background:rgba(239,83,80,.12); border-color:rgba(239,83,80,.4); animation:pillGlowChg 2s ease-in-out infinite; }
     .pill-dis  { color:#ffa726;    background:rgba(255,143,0,.12); border-color:rgba(255,143,0,.4); animation:pillGlowDis 2s ease-in-out infinite; }
     .pill-stale { color:#546e7a; background:rgba(84,110,122,.1); border-color:rgba(84,110,122,.3); }
 
@@ -979,7 +978,6 @@ class BmsBatteryCardV5 extends HTMLElement {
     @keyframes pulseBalDot     { 0%,100%{box-shadow:0 0 4px rgba(192,132,252,.4)} 50%{box-shadow:0 0 12px rgba(192,132,252,.85)} }
     @keyframes svgGlowWarm     { 0%,100%{filter:drop-shadow(0 0 5px rgba(239,83,80,.3))} 50%{filter:drop-shadow(0 0 18px rgba(239,83,80,.8))} }
     @keyframes svgGlowAmber    { 0%,100%{filter:drop-shadow(0 0 5px rgba(255,143,0,.3))} 50%{filter:drop-shadow(0 0 18px rgba(255,143,0,.8))} }
-    @keyframes pillGlowChg     { 0%,100%{box-shadow:0 0 4px rgba(239,83,80,.25)} 50%{box-shadow:0 0 16px rgba(239,83,80,.75)} }
     @keyframes pillGlowDis     { 0%,100%{box-shadow:0 0 4px rgba(255,143,0,.25)} 50%{box-shadow:0 0 16px rgba(255,143,0,.75)} }
     @keyframes chipShimmerChg  { 0%,100%{box-shadow:0 0 4px rgba(239,83,80,.12)} 50%{box-shadow:0 0 20px rgba(239,83,80,.65),inset 0 0 8px rgba(239,83,80,.08)} }
     @keyframes chipShimmerDis  { 0%,100%{box-shadow:0 0 4px rgba(255,143,0,.12)} 50%{box-shadow:0 0 20px rgba(255,143,0,.65),inset 0 0 8px rgba(255,143,0,.08)} }
@@ -1427,9 +1425,8 @@ class BmsBatteryCardV5 extends HTMLElement {
     const pill = this._q('status-pill');
     if (pill) {
       if (isStale)          { pill.textContent = '⚪ Inactive';    pill.setAttribute('class','pill pill-stale'); }
-      else if (charging)    { pill.textContent = '⚡ Charging';    pill.setAttribute('class','pill pill-chg'); }
       else if (discharging) { pill.textContent = '🔌 Discharging'; pill.setAttribute('class','pill pill-dis'); }
-      else                  { pill.textContent = '⏸ Idle';      pill.setAttribute('class','pill pill-idle'); }
+      else                  { pill.textContent = '⏸ Idle';        pill.setAttribute('class','pill pill-idle'); }
     }
     const accent = this._q('accent');
     if (accent) accent.setAttribute('class', 'accent'+(isStale?' stale':charging?' chg':discharging?' dis':''));

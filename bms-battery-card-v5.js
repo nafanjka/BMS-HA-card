@@ -27,6 +27,9 @@ class BmsBatteryCardV5 extends HTMLElement {
     this._autoResetTimer  = null;
     this._visibilityHandler = null;
     this._hasSynced = false;
+    this._chartData       = null;
+    this._chartFetching   = false;
+    this._chartFetchedAt  = 0;
   }
 
   disconnectedCallback() {
@@ -42,6 +45,10 @@ class BmsBatteryCardV5 extends HTMLElement {
   setConfig(cfg) {
     if (!cfg) throw new Error('Missing card configuration');
     this._config = { entities: {}, ...cfg };
+    // chart_hours: history window in hours (default 24, e.g. 6 / 24 / 48)
+    // chart_update_interval: re-fetch interval in seconds (default 300; minimum 30)
+    this._chartHours          = Math.max(1,  parseInt(cfg.chart_hours)           || 24);
+    this._chartUpdateInterval = Math.max(30, parseInt(cfg.chart_update_interval) || 300) * 1000;
     this._initialized = false;
     this._render();
   }
@@ -573,6 +580,14 @@ class BmsBatteryCardV5 extends HTMLElement {
 
       // Manual reset — handled by long-press listener, not click
 
+      // Tap-to-history — any tile with data-tap-entity (skip switch chips, already handled above)
+      const tappable = ev.target.closest('[data-tap-entity]');
+      if (tappable && !tappable.classList.contains('sw-chip')) {
+        const eid = tappable.dataset.tapEntity;
+        if (eid) this._fireMoreInfo(eid);
+        return;
+      }
+
       // Auto reset toggle button
       if (ev.target.closest('#btn-auto-reset')) {
         const sel = this._q('reset-period-sel');
@@ -628,6 +643,369 @@ class BmsBatteryCardV5 extends HTMLElement {
       btn.textContent = this._autoResetActive ? '⚡ AUTO ON' : 'AUTO';
     }
     if (sel && this._autoResetActive) sel.value = this._autoResetMode;
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // Tap-to-history helper
+  // ═════════════════════════════════════════════════════════════════════════
+  _fireMoreInfo(eid) {
+    if (!eid) return;
+    const ev = new Event('hass-more-info', { bubbles: true, composed: true });
+    ev.detail = { entityId: eid };
+    this.dispatchEvent(ev);
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // 24-hour history chart
+  // ═════════════════════════════════════════════════════════════════════════
+  _smoothPath(pts) {
+    if (!pts || pts.length < 2) return '';
+    const n = pts.length;
+    let d = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+    for (let i = 0; i < n - 1; i++) {
+      const p0 = pts[Math.max(0, i - 1)];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[Math.min(n - 1, i + 2)];
+      const cp1x = p1[0] + (p2[0] - p0[0]) / 6;
+      const cp1y = p1[1] + (p2[1] - p0[1]) / 6;
+      const cp2x = p2[0] - (p3[0] - p1[0]) / 6;
+      const cp2y = p2[1] - (p3[1] - p1[1]) / 6;
+      d += ` C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+    }
+    return d;
+  }
+
+  _processHistory(raw, powKey, curKey, startMs, totalHours) {
+    const N        = 48;
+    const bucketMs = Math.round((totalHours * 3600000) / N);
+
+    const bucket = key => {
+      const series = raw[key] || [];
+      const sums = new Array(N).fill(0);
+      const cnts = new Array(N).fill(0);
+      for (const pt of series) {
+        // HA returns either full format {state, last_changed} or minimal {s, lc (unix float)}
+        const v = parseFloat(pt.state ?? pt.s);
+        if (!isFinite(v)) continue;
+        const tMs = pt.last_changed
+          ? new Date(pt.last_changed).getTime()
+          : ((pt.lc ?? pt.lu) * 1000);
+        const idx = Math.floor((tMs - startMs) / bucketMs);
+        if (idx >= 0 && idx < N) { sums[idx] += v; cnts[idx]++; }
+      }
+      const out = [];
+      let last = 0;
+      for (let i = 0; i < N; i++) {
+        if (cnts[i] > 0) last = sums[i] / cnts[i];
+        out.push(last);
+      }
+      return out;
+    };
+
+    const power   = powKey ? bucket(powKey) : new Array(N).fill(0);
+    const current = curKey ? bucket(curKey) : new Array(N).fill(0);
+
+    // Sign power based on current direction (handles unsigned BMS power entities)
+    if (powKey && curKey) {
+      for (let i = 0; i < N; i++) {
+        if (current[i] < -0.3) power[i] = -Math.abs(power[i]);
+        else if (current[i] > 0.3) power[i] = Math.abs(power[i]);
+      }
+    }
+    return { power, current, startMs };
+  }
+
+  async _fetchChartHistory() {
+    if (this._chartFetching || !this._hass?.connection) return;
+    const e = this._config?.entities || {};
+    const curKey = e.current;
+    const powKey = e.power;
+    if (!curKey && !powKey) return;
+
+    this._chartFetching = true;
+    const hours = this._chartHours ?? 24;
+    try {
+      const end   = new Date();
+      const start = new Date(end.getTime() - hours * 3600000);
+      const ids   = [curKey, powKey].filter(Boolean);
+
+      const raw = await this._hass.connection.sendMessagePromise({
+        type: 'history/history_during_period',
+        start_time: start.toISOString(),
+        end_time:   end.toISOString(),
+        entity_ids: ids,
+        include_start_time_state: true,
+        significant_changes_only: false,
+        no_attributes: true,
+        minimal_response: true,
+      });
+
+      this._chartData      = this._processHistory(raw, powKey, curKey, start.getTime(), hours);
+      this._chartFetchedAt = Date.now();
+      this._renderChart();
+    } catch(err) {
+      console.warn('[BMS chart] history fetch failed:', err);
+      this._chartFetching = false;
+      // Retry without minimal_response for older HA versions
+      try {
+        const end   = new Date();
+        const start = new Date(end.getTime() - hours * 3600000);
+        const ids   = [curKey, powKey].filter(Boolean);
+        const raw = await this._hass.connection.sendMessagePromise({
+          type: 'history/history_during_period',
+          start_time: start.toISOString(),
+          end_time:   end.toISOString(),
+          entity_ids: ids,
+          include_start_time_state: true,
+          significant_changes_only: false,
+        });
+        this._chartData      = this._processHistory(raw, powKey, curKey, start.getTime(), hours);
+        this._chartFetchedAt = Date.now();
+        this._renderChart();
+      } catch(err2) { console.warn('[BMS chart] history fallback also failed:', err2); }
+    }
+    finally { this._chartFetching = false; }
+  }
+
+  _renderChart() {
+    const svg = this._q('chart-svg');
+    if (!svg) return;
+    if (!this._chartData) {
+      svg.setAttribute('viewBox', '0 0 400 130');
+      svg.innerHTML = `
+        <text x="200" y="68" text-anchor="middle" font-size="9"
+              font-family="Inter,system-ui,sans-serif" fill="rgba(255,255,255,0.18)">
+          Loading history…
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.6s" repeatCount="indefinite"/>
+        </text>`;
+      return;
+    }
+
+    const VW=400, VH=130;
+    const PL=40, PR=40, PT=14, PB=20;
+    const PW=VW-PL-PR, PH=VH-PT-PB;
+    const ZY=PT+PH/2;
+
+    const { power, current, startMs } = this._chartData;
+    const totalH = this._chartHours ?? 24;
+    const N = power.length;
+
+    const maxPow = Math.max(...power.map(v => Math.abs(v)), 20);
+    const maxCur = Math.max(...current.map(v => Math.abs(v)), 1);
+    const pSc = (PH/2 - 5) / maxPow;
+    const cSc = (PH/2 - 5) / maxCur;
+
+    const toX  = i => PL + (i / (N-1)) * PW;
+    const pPts = power.map((v,i)   => [toX(i), ZY - v*pSc]);
+    const cPts = current.map((v,i) => [toX(i), ZY - v*cSc]);
+
+    const pLine = this._smoothPath(pPts);
+    const cLine = this._smoothPath(cPts);
+    const x0=PL.toFixed(1), xN=(PL+PW).toFixed(1), zy=ZY.toFixed(1);
+    const pFill = `${pLine} L${xN},${zy} L${x0},${zy} Z`;
+    const cFill = `${cLine} L${xN},${zy} L${x0},${zy} Z`;
+
+    // Horizontal guide lines at ±50% scale
+    let hGrid = '';
+    const hOff = ((PH/2 - 5) * 0.5).toFixed(1);
+    hGrid += `<line x1="${PL}" y1="${(ZY-hOff)}" x2="${PL+PW}" y2="${(ZY-hOff)}" stroke="rgba(255,255,255,0.035)" stroke-width="0.5" stroke-dasharray="3,6"/>`;
+    hGrid += `<line x1="${PL}" y1="${(ZY+hOff)}" x2="${PL+PW}" y2="${(ZY+hOff)}" stroke="rgba(255,255,255,0.035)" stroke-width="0.5" stroke-dasharray="3,6"/>`;
+
+    // Vertical grid + x-axis labels
+    const stepH = totalH<=12 ? 2 : totalH<=24 ? 4 : 8;
+    let vGrid='', xLabels='';
+    for (let h=0; h<=totalH; h+=stepH) {
+      const x     = (PL + (h/totalH)*PW).toFixed(1);
+      const t     = new Date(startMs + h*3600000);
+      const lbl   = `${t.getHours().toString().padStart(2,'0')}:00`;
+      const isNow = h === totalH;
+      vGrid   += `<line x1="${x}" y1="${PT}" x2="${x}" y2="${VH-PB}" stroke="rgba(255,255,255,0.045)" stroke-width="0.5"/>`;
+      xLabels += `<text x="${x}" y="${VH-5}" text-anchor="middle" fill="${isNow?'rgba(255,255,255,0.40)':'rgba(255,255,255,0.20)'}" font-size="7" font-family="Inter,system-ui,sans-serif">${lbl}</text>`;
+    }
+
+    const fmt  = v => v>=1000 ? `${(v/1000).toFixed(1)}k` : `${Math.round(v)}`;
+    const fmtA = v => v>=10   ? `${Math.round(v)}`         : `${v.toFixed(1)}`;
+    const ax   = (x,y,txt,clr,anchor='end') =>
+      `<text x="${x}" y="${y}" text-anchor="${anchor}" fill="${clr}" font-size="6.5" font-family="Inter,system-ui,sans-serif">${txt}</text>`;
+
+    svg.setAttribute('viewBox', `0 0 ${VW} ${VH}`);
+    svg.innerHTML = `
+      <defs>
+        <clipPath id="bcp"><rect x="${PL}" y="${PT}"         width="${PW}" height="${(PH/2+1).toFixed(1)}"/></clipPath>
+        <clipPath id="bcn"><rect x="${PL}" y="${(ZY-1).toFixed(1)}" width="${PW}" height="${(PH/2+1).toFixed(1)}"/></clipPath>
+
+        <linearGradient id="bg-g" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stop-color="#0d1f38" stop-opacity="0.55"/>
+          <stop offset="100%" stop-color="#060d1a" stop-opacity="0.55"/>
+        </linearGradient>
+        <linearGradient id="gpp" x1="0" y1="${PT}"    x2="0" y2="${ZY}"    gradientUnits="userSpaceOnUse">
+          <stop offset="0%"   stop-color="#66bb6a" stop-opacity="0.45"/>
+          <stop offset="50%"  stop-color="#388e3c" stop-opacity="0.18"/>
+          <stop offset="100%" stop-color="#1b5e20" stop-opacity="0"/>
+        </linearGradient>
+        <linearGradient id="gpn" x1="0" y1="${ZY}"    x2="0" y2="${VH-PB}" gradientUnits="userSpaceOnUse">
+          <stop offset="0%"   stop-color="#1b5e20" stop-opacity="0"/>
+          <stop offset="50%"  stop-color="#388e3c" stop-opacity="0.18"/>
+          <stop offset="100%" stop-color="#66bb6a" stop-opacity="0.45"/>
+        </linearGradient>
+        <linearGradient id="gcp" x1="0" y1="${PT}"    x2="0" y2="${ZY}"    gradientUnits="userSpaceOnUse">
+          <stop offset="0%"   stop-color="#ef5350" stop-opacity="0.32"/>
+          <stop offset="50%"  stop-color="#c62828" stop-opacity="0.12"/>
+          <stop offset="100%" stop-color="#7f0000" stop-opacity="0"/>
+        </linearGradient>
+        <linearGradient id="gcn" x1="0" y1="${ZY}"    x2="0" y2="${VH-PB}" gradientUnits="userSpaceOnUse">
+          <stop offset="0%"   stop-color="#7f0000" stop-opacity="0"/>
+          <stop offset="50%"  stop-color="#c62828" stop-opacity="0.12"/>
+          <stop offset="100%" stop-color="#ef5350" stop-opacity="0.32"/>
+        </linearGradient>
+
+        <filter id="fw-g" x="-20%" y="-80%" width="140%" height="260%">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="2.2" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="fw-r" x="-20%" y="-80%" width="140%" height="260%">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="1.6" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="tt-sh" x="-15%" y="-20%" width="130%" height="140%">
+          <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="rgba(0,0,0,0.75)"/>
+        </filter>
+      </defs>
+
+      <!-- depth background -->
+      <rect x="${PL}" y="${PT}" width="${PW}" height="${PH}" rx="3" fill="url(#bg-g)"/>
+      <!-- top glass edge -->
+      <line x1="${PL}" y1="${PT}" x2="${PL+PW}" y2="${PT}" stroke="rgba(255,255,255,0.07)" stroke-width="0.8"/>
+
+      ${hGrid}
+      ${vGrid}
+
+      <!-- fills -->
+      <path d="${pFill}" fill="url(#gpp)" clip-path="url(#bcp)"/>
+      <path d="${pFill}" fill="url(#gpn)" clip-path="url(#bcn)"/>
+      <path d="${cFill}" fill="url(#gcp)" clip-path="url(#bcp)"/>
+      <path d="${cFill}" fill="url(#gcn)" clip-path="url(#bcn)"/>
+
+      <!-- zero line -->
+      <line x1="${PL}" y1="${zy}" x2="${PL+PW}" y2="${zy}"
+            stroke="rgba(255,255,255,0.12)" stroke-width="0.6" stroke-dasharray="3,5"/>
+
+      <!-- series lines -->
+      <path id="cp-line" d="${pLine}" fill="none"
+            stroke="#66bb6a" stroke-width="2.2"
+            stroke-linejoin="round" stroke-linecap="round" filter="url(#fw-g)"/>
+      <path id="cc-line" d="${cLine}" fill="none"
+            stroke="#ef5350" stroke-width="1.5"
+            stroke-linejoin="round" stroke-linecap="round" filter="url(#fw-r)"/>
+
+      <!-- Y-axis labels -->
+      ${ax(PL-5, PT+9,       '+'+fmt(maxPow)+'W',  'rgba(102,187,106,0.65)')}
+      ${ax(PL-5, ZY+3,       '0',                   'rgba(255,255,255,0.22)')}
+      ${ax(PL-5, VH-PB-3,    '-'+fmt(maxPow)+'W',  'rgba(102,187,106,0.65)')}
+      ${ax(PL+PW+5, PT+9,      '+'+fmtA(maxCur)+'A', 'rgba(239,83,80,0.60)', 'start')}
+      ${ax(PL+PW+5, VH-PB-3,   '-'+fmtA(maxCur)+'A', 'rgba(239,83,80,0.60)', 'start')}
+
+      ${xLabels}
+
+      <!-- Tooltip group -->
+      <g id="ct-tt" style="display:none" pointer-events="none">
+        <line id="ct-vl" x1="0" y1="${PT}" x2="0" y2="${VH-PB}"
+              stroke="rgba(255,255,255,0.35)" stroke-width="0.8" stroke-dasharray="3,3"/>
+        <circle id="ct-pd" r="4.5" fill="#66bb6a"
+                stroke="rgba(255,255,255,0.8)" stroke-width="1.4" filter="url(#fw-g)"/>
+        <circle id="ct-cd" r="3.5" fill="#ef5350"
+                stroke="rgba(255,255,255,0.7)" stroke-width="1.1" filter="url(#fw-r)"/>
+        <rect id="ct-box" rx="7" ry="7"
+              fill="rgba(6,13,26,0.94)" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"
+              filter="url(#tt-sh)"/>
+        <text id="ct-time" font-size="8" font-weight="700"
+              font-family="Inter,system-ui,sans-serif"
+              fill="rgba(255,255,255,0.85)" text-anchor="middle"/>
+        <rect id="ct-div" height="0.7" fill="rgba(255,255,255,0.10)"/>
+        <text id="ct-pow" font-size="7.5" font-family="Inter,system-ui,sans-serif" fill="#a5d6a7"/>
+        <text id="ct-cur" font-size="7.5" font-family="Inter,system-ui,sans-serif" fill="#ef9a9a"/>
+      </g>
+
+      <!-- Event capture overlay -->
+      <rect id="ct-cap" x="${PL}" y="${PT}" width="${PW}" height="${PH}"
+            fill="transparent" style="cursor:crosshair"/>
+    `;
+
+    // ── Draw-in animation ────────────────────────────────────────────────────
+    const pl = svg.querySelector('#cp-line');
+    const cl = svg.querySelector('#cc-line');
+    if (pl && cl) {
+      try {
+        const pLen = pl.getTotalLength(), cLen = cl.getTotalLength();
+        pl.style.strokeDasharray = pLen;  pl.style.strokeDashoffset = pLen;
+        cl.style.strokeDasharray = cLen;  cl.style.strokeDashoffset = cLen;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          pl.style.transition = 'stroke-dashoffset 1.4s cubic-bezier(0.4,0,0.2,1)';
+          cl.style.transition = 'stroke-dashoffset 1.1s cubic-bezier(0.4,0,0.2,1) 0.2s';
+          pl.style.strokeDashoffset = 0;
+          cl.style.strokeDashoffset = 0;
+        }));
+      } catch(_) {}
+    }
+
+    // ── Tooltip interaction ──────────────────────────────────────────────────
+    const cap  = svg.querySelector('#ct-cap');
+    const ttg  = svg.querySelector('#ct-tt');
+    if (!cap || !ttg) return;
+    const tvl  = ttg.querySelector('#ct-vl');
+    const tpd  = ttg.querySelector('#ct-pd');
+    const tcd  = ttg.querySelector('#ct-cd');
+    const tbox = ttg.querySelector('#ct-box');
+    const ttim = ttg.querySelector('#ct-time');
+    const tdiv = ttg.querySelector('#ct-div');
+    const tpow = ttg.querySelector('#ct-pow');
+    const tcur = ttg.querySelector('#ct-cur');
+    const bucketMs = Math.round((totalH * 3600000) / N);
+
+    const show = (svgX) => {
+      const idx = Math.min(N-1, Math.max(0, Math.round((svgX - PL) / PW * (N-1))));
+      const px  = toX(idx), py = pPts[idx][1], cy = cPts[idx][1];
+      const t   = new Date(startMs + idx * bucketMs);
+      const ts  = `${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}`;
+      const pv  = power[idx], cv = current[idx];
+      const ps  = (pv >= 0 ? '+' : '') + Math.round(pv) + ' W';
+      const cs  = (cv >= 0 ? '+' : '') + (cv >= 10 ? Math.round(cv) : cv.toFixed(1)) + ' A';
+
+      tvl.setAttribute('x1', px); tvl.setAttribute('x2', px);
+      tpd.setAttribute('cx', px); tpd.setAttribute('cy', py);
+      tcd.setAttribute('cx', px); tcd.setAttribute('cy', cy);
+
+      const BW=76, BH=46, PAD=8;
+      const bx = px + PAD + BW > PL + PW ? px - PAD - BW : px + PAD;
+      const by = Math.max(PT+2, Math.min(VH-PB-BH-2, (py+cy)/2 - BH/2));
+
+      tbox.setAttribute('x', bx);   tbox.setAttribute('y', by);
+      tbox.setAttribute('width', BW); tbox.setAttribute('height', BH);
+      tdiv.setAttribute('x', bx+7); tdiv.setAttribute('y', by+18); tdiv.setAttribute('width', BW-14);
+      ttim.setAttribute('x', bx+BW/2); ttim.setAttribute('y', by+13);
+      tpow.setAttribute('x', bx+8);    tpow.setAttribute('y', by+29);
+      tcur.setAttribute('x', bx+8);    tcur.setAttribute('y', by+41);
+
+      ttim.textContent = ts;
+      tpow.textContent = '⚡ ' + ps;
+      tcur.textContent = '↯ ' + cs;
+      ttg.style.display = '';
+    };
+
+    const toSvgX = e => {
+      const r = svg.getBoundingClientRect();
+      return (e.clientX - r.left) * (VW / r.width);
+    };
+
+    cap.addEventListener('mousemove',  e => show(toSvgX(e)));
+    cap.addEventListener('mouseleave', () => { ttg.style.display = 'none'; });
+    cap.addEventListener('touchmove',  e => {
+      e.preventDefault();
+      const r = svg.getBoundingClientRect();
+      show((e.touches[0].clientX - r.left) * (VW / r.width));
+    }, { passive: false });
+    cap.addEventListener('touchend', () => { ttg.style.display = 'none'; });
   }
 
   // ═════════════════════════════════════════════════════════════════════════
@@ -824,6 +1202,47 @@ class BmsBatteryCardV5 extends HTMLElement {
     }
     .fn-val { font-size:15px; font-weight:800; line-height:1; margin-bottom:2px; }
     .fn-lbl { font-size:8px; color:var(--txt3); text-transform:uppercase; letter-spacing:.4px; }
+
+    /* ── 24h chart ── */
+    .chart-section {
+      margin:8px 0 12px;
+      padding:10px 12px 8px;
+      border-radius:14px;
+      background:linear-gradient(175deg,rgba(18,32,58,0.80) 0%,rgba(8,14,26,0.88) 100%);
+      border:1px solid rgba(255,255,255,0.09);
+      box-shadow:0 6px 28px rgba(0,0,0,0.50), inset 0 1px 0 rgba(255,255,255,0.07);
+    }
+    .chart-hdr {
+      display:flex; align-items:center; justify-content:space-between; margin-bottom:5px;
+    }
+    .chart-legend { display:flex; gap:14px; align-items:center; }
+    .chart-legend-pow,
+    .chart-legend-cur { display:flex; align-items:center; gap:5px; font-size:9px; }
+    .chart-legend-pow { color:rgba(102,187,106,0.90); }
+    .chart-legend-cur { color:rgba(239,83,80,0.90); }
+    .chart-legend-pow::before {
+      content:''; display:inline-block; width:18px; height:2px;
+      background:#66bb6a; border-radius:1px;
+      box-shadow:0 0 6px rgba(102,187,106,0.80);
+    }
+    .chart-legend-cur::before {
+      content:''; display:inline-block; width:18px; height:1.5px;
+      background:#ef5350; border-radius:1px;
+      box-shadow:0 0 5px rgba(239,83,80,0.80);
+    }
+    .chart-svg { width:100%; height:auto; display:block; }
+
+    /* ── Tap-to-history ── */
+    [data-tap-entity] { cursor:pointer; }
+    .stat[data-tap-entity] { border-radius:10px; transition:background .15s; }
+    .stat[data-tap-entity]:hover { background:rgba(255,255,255,0.04); }
+    .stat[data-tap-entity]:active { transform:scale(0.95); }
+    .bat3d-item[data-tap-entity] { transition:filter .15s; }
+    .bat3d-item[data-tap-entity]:hover { filter:brightness(1.15); }
+    .temp-item[data-tap-entity] { border-radius:8px; transition:background .15s; }
+    .temp-item[data-tap-entity]:hover { background:rgba(255,255,255,0.04); }
+    .foot-item[data-tap-entity] { border-radius:8px; transition:background .15s; cursor:pointer; }
+    .foot-item[data-tap-entity]:hover { background:rgba(255,255,255,0.04); }
 
     /* ── 3-D Battery cells (styles untouched) ── */
     .cells-section { margin-bottom:14px; }
@@ -1152,8 +1571,9 @@ class BmsBatteryCardV5 extends HTMLElement {
     const padded = Math.ceil(n / COLS) * COLS;
     const cells  = Array.from({ length: padded }, (_, i) => {
       if (i >= n) return `<div class="bat3d-item cell-placeholder"></div>`;
+      const cellEid = e[`cell_voltage_${i+1}`] || '';
       return `
-      <div class="bat3d-item" id="cell-${i+1}">
+      <div class="bat3d-item" id="cell-${i+1}" ${cellEid ? `data-tap-entity="${cellEid}"` : ''}>
         <div class="bat3d-lbl" id="cell-num-${i+1}">C${i+1}</div>
         ${this._cellSVG(i)}
         <div class="bat3d-volt" id="cv-${i+1}">--</div>
@@ -1173,8 +1593,8 @@ class BmsBatteryCardV5 extends HTMLElement {
     <div class="temp-section">
       <div class="sec-lbl">🌡️ Temperature</div>
       <div class="temp-grid">
-        ${tempDefs.map(([k, lbl]) => `
-        <div class="temp-item" id="temp-item-${k}">
+        ${tempDefs.map(([k, lbl, eid]) => `
+        <div class="temp-item" id="temp-item-${k}" ${eid ? `data-tap-entity="${eid}"` : ''}>
           <div class="therm-wrap">
             <div class="therm-tube"><div class="therm-fill" id="tf-${k}"></div></div>
             <div class="therm-bulb" id="tbulb-${k}"></div>
@@ -1192,16 +1612,16 @@ class BmsBatteryCardV5 extends HTMLElement {
 
     const footerStats = `
     <div class="footer-stats">
-      <div class="foot-item"><div class="foot-icon">🔄</div><div class="foot-val" id="ft-cycles">--</div><div class="foot-lbl">Cycles</div></div>
-      ${hasRuntime ? `<div class="foot-item"><div class="foot-icon">⏱</div><div class="foot-val" id="ft-runtime" style="font-size:11px">--</div><div class="foot-lbl">Runtime</div></div>` : ''}
-      <div class="foot-item"><div class="foot-icon">⚡</div><div class="foot-val" id="ft-avgv">--</div><div class="foot-lbl">Avg Cell V</div></div>
-      ${hasCyccap ? `<div class="foot-item"><div class="foot-icon">🔋</div><div class="foot-val" id="ft-cyccap">--</div><div class="foot-lbl">Cycle Ah</div></div>` : ''}
+      <div class="foot-item" ${e.charging_cycles ? `data-tap-entity="${e.charging_cycles}"` : ''}><div class="foot-icon">🔄</div><div class="foot-val" id="ft-cycles">--</div><div class="foot-lbl">Cycles</div></div>
+      ${hasRuntime ? `<div class="foot-item" ${e.total_runtime_formatted ? `data-tap-entity="${e.total_runtime_formatted}"` : ''}><div class="foot-icon">⏱</div><div class="foot-val" id="ft-runtime" style="font-size:11px">--</div><div class="foot-lbl">Runtime</div></div>` : ''}
+      <div class="foot-item" ${e.average_cell_voltage ? `data-tap-entity="${e.average_cell_voltage}"` : ''}><div class="foot-icon">⚡</div><div class="foot-val" id="ft-avgv">--</div><div class="foot-lbl">Avg Cell V</div></div>
+      ${hasCyccap ? `<div class="foot-item" ${e.total_charging_cycle_capacity ? `data-tap-entity="${e.total_charging_cycle_capacity}"` : ''}><div class="foot-icon">🔋</div><div class="foot-val" id="ft-cyccap">--</div><div class="foot-lbl">Cycle Ah</div></div>` : ''}
     </div>`;
 
     const footerEnergy = hasEnergy ? `
     <div class="footer-energy">
-      <div class="foot-item"><div class="foot-val" id="ft-ein" style="color:var(--green)">--</div><div class="foot-lbl">⬇ Energy In</div></div>
-      <div class="foot-item"><div class="foot-val" id="ft-eout" style="color:var(--blue)">--</div><div class="foot-lbl">⬆ Energy Out</div></div>
+      <div class="foot-item" ${e.energy_in ? `data-tap-entity="${e.energy_in}"` : ''}><div class="foot-val" id="ft-ein" style="color:var(--green)">--</div><div class="foot-lbl">⬇ Energy In</div></div>
+      <div class="foot-item" ${e.energy_out ? `data-tap-entity="${e.energy_out}"` : ''}><div class="foot-val" id="ft-eout" style="color:var(--blue)">--</div><div class="foot-lbl">⬆ Energy Out</div></div>
     </div>` : '';
 
     const resetSection = hasEclear ? `
@@ -1252,10 +1672,10 @@ class BmsBatteryCardV5 extends HTMLElement {
 
           <div class="right">
             <div class="stats-grid">
-              <div class="stat"><div class="stat-icon">🔌</div><div class="stat-lbl">Voltage</div><div class="stat-val" id="sv-v">--<span class="u">V</span></div></div>
-              <div class="stat"><div class="stat-icon">⚡</div><div class="stat-lbl">Current</div><div class="stat-val" id="sv-i">--<span class="u">A</span></div></div>
-              <div class="stat"><div class="stat-icon">🔋</div><div class="stat-lbl">Remaining</div><div class="stat-val" id="sv-rem">--<span class="u">Ah</span></div></div>
-              <div class="stat"><div class="stat-icon">⏱</div><div class="stat-lbl">Time Left</div><div class="stat-val" id="sv-time" style="font-size:15px">--</div></div>
+              <div class="stat" data-tap-entity="${e.total_voltage || ''}"><div class="stat-icon">🔌</div><div class="stat-lbl">Voltage</div><div class="stat-val" id="sv-v">--<span class="u">V</span></div></div>
+              <div class="stat" data-tap-entity="${e.current || ''}"><div class="stat-icon">⚡</div><div class="stat-lbl">Current</div><div class="stat-val" id="sv-i">--<span class="u">A</span></div></div>
+              <div class="stat" data-tap-entity="${e.capacity_remaining || ''}"><div class="stat-icon">🔋</div><div class="stat-lbl">Remaining</div><div class="stat-val" id="sv-rem">--<span class="u">Ah</span></div></div>
+              <div class="stat" data-tap-entity="${e.time_left || ''}"><div class="stat-icon">⏱</div><div class="stat-lbl">Time Left</div><div class="stat-val" id="sv-time" style="font-size:15px">--</div></div>
             </div>
             ${(e.charging_mosfet_state || e.discharging_mosfet_state) ? `
             <div class="mos-row">
@@ -1307,6 +1727,18 @@ class BmsBatteryCardV5 extends HTMLElement {
             </div>
           </div>
         </div>
+
+        ${(e.current || e.power) ? `
+        <div class="chart-section">
+          <div class="chart-hdr">
+            <span class="sec-lbl" style="margin:0">📈 ${this._chartHours ?? 24}h History</span>
+            <div class="chart-legend">
+              <span class="chart-legend-pow">— Power (W)</span>
+              <span class="chart-legend-cur">— Current (A)</span>
+            </div>
+          </div>
+          <svg id="chart-svg" class="chart-svg" viewBox="0 0 400 130"></svg>
+        </div>` : ''}
 
         <div class="cells-section">
           <div class="row-head">
@@ -1642,6 +2074,13 @@ class BmsBatteryCardV5 extends HTMLElement {
       this._set('ft-ein',  eIn  !== null ? `${eIn.toFixed(3)}<span style="font-size:9px;color:var(--txt2)"> kWh</span>` : '--');
     if (this._has('energy_out'))
       this._set('ft-eout', eOut !== null ? `${eOut.toFixed(3)}<span style="font-size:9px;color:var(--txt2)"> kWh</span>` : '--');
+
+    // ── Chart: refresh per chart_update_interval (default 5 min, min 30 s) ──
+    if ((e.current || e.power) && Date.now() - this._chartFetchedAt > (this._chartUpdateInterval ?? 300000)) {
+      this._fetchChartHistory();
+    } else if (this._chartData && this._q('chart-svg') && !this._q('chart-svg').childElementCount) {
+      this._renderChart(); // re-draw after re-render
+    }
 
     // ── Status bar ────────────────────────────────────────────────────────
     const warnStr = this._state(e.errors);

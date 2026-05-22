@@ -45,6 +45,15 @@ autoResetEnabled: false      # true = AUTO reset active on all devices by defaul
 autoResetPeriod: daily       # daily | weekly | monthly
                              # only has effect when autoResetEnabled is true
 
+# ── History chart ────────────────────────────────────────────────────────────
+chart_hours: 24           # hours of history shown in the 24h chart (default: 24)
+                          # practical values: 6, 12, 24, 48
+                          # shorter = finer bucket resolution, longer = wider overview
+
+chart_update_interval: 300  # seconds between chart re-fetches from HA history (default: 300)
+                             # minimum: 30 — lower values put unnecessary load on
+                             # the HA recorder database; recommended: 300 (5 min)
+
 # ── Wave animation tuning ─────────────────────────────────────────────────────
 waveSpeed: 0.009          # px/ms — base liquid wave scroll speed inside cell tubes
                           # lower = slower slosh (0.005), higher = faster (0.015)

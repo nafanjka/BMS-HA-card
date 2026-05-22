@@ -24,6 +24,7 @@ class BmsBatteryCardV5 extends HTMLElement {
     this._lastChangeTime  = null;
     this._autoResetActive = false;
     this._autoResetMode   = 'none';
+    this._autoResetTimer  = null;
     this._visibilityHandler = null;
     this._hasSynced = false;
   }
@@ -31,6 +32,7 @@ class BmsBatteryCardV5 extends HTMLElement {
   disconnectedCallback() {
     if (this._flowRaf) cancelAnimationFrame(this._flowRaf);
     if (this._visibilityHandler) document.removeEventListener('visibilitychange', this._visibilityHandler);
+    if (this._autoResetTimer) { clearTimeout(this._autoResetTimer); this._autoResetTimer = null; }
   }
 
   static getStubConfig() {
@@ -437,6 +439,7 @@ class BmsBatteryCardV5 extends HTMLElement {
         this._autoResetActive = !!d.active;
         this._autoResetMode   = d.mode || 'none';
         this._updateAutoResetUI();
+        this._scheduleAutoReset();
         // Refresh localStorage cache so next paint is instant
         try { localStorage.setItem(this._uiStateKey(), JSON.stringify({ active: this._autoResetActive, mode: this._autoResetMode })); } catch {}
       }
@@ -460,25 +463,39 @@ class BmsBatteryCardV5 extends HTMLElement {
     }
   }
 
-  _checkAutoReset() {
-    if (!this._autoResetActive || this._autoResetMode === 'none') return;
+  _nextResetTime() {
+    // Returns the next future threshold Date for the current reset mode, or null.
     const now = new Date();
-    const key = this._storageKey();
-    const last = (() => { try { const s = localStorage.getItem(key); return s ? new Date(s) : null; } catch { return null; } })();
-    let threshold = null;
     if (this._autoResetMode === 'daily') {
-      threshold = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const t = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+      return t;
     } else if (this._autoResetMode === 'weekly') {
-      const d = new Date(now); d.setHours(0,0,0,0);
-      d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-      threshold = d;
+      const t = new Date(now); t.setHours(0,0,0,0);
+      // Next Monday
+      t.setDate(t.getDate() + (7 - ((t.getDay() + 6) % 7)));
+      return t;
     } else if (this._autoResetMode === 'monthly') {
-      threshold = new Date(now.getFullYear(), now.getMonth(), 1);
+      return new Date(now.getFullYear(), now.getMonth() + 1, 1);
     }
-    if (threshold && (!last || last < threshold)) {
+    return null;
+  }
+
+  _scheduleAutoReset() {
+    // Cancel any existing timer so re-scheduling is idempotent.
+    if (this._autoResetTimer) { clearTimeout(this._autoResetTimer); this._autoResetTimer = null; }
+    if (!this._autoResetActive || this._autoResetMode === 'none') return;
+
+    const next = this._nextResetTime();
+    if (!next) return;
+    const msUntilNext = next.getTime() - Date.now();
+    // Clamp to at least 1 s to avoid degenerate zero-delay loops.
+    this._autoResetTimer = setTimeout(() => {
+      this._autoResetTimer = null;
       this._performReset();
-      try { localStorage.setItem(key, now.toISOString()); } catch {}
-    }
+      try { localStorage.setItem(this._storageKey(), new Date().toISOString()); } catch {}
+      // Reschedule for the NEXT period.
+      this._scheduleAutoReset();
+    }, Math.max(1000, msUntilNext));
   }
 
   _performReset() {
@@ -573,6 +590,7 @@ class BmsBatteryCardV5 extends HTMLElement {
           try { localStorage.setItem(this._storageKey(), new Date().toISOString()); } catch {}
         }
         this._updateAutoResetUI();
+        this._scheduleAutoReset();
         this._saveAutoState();
         return;
       }
@@ -587,6 +605,7 @@ class BmsBatteryCardV5 extends HTMLElement {
           this._autoResetMode = ev.target.value;
           if (ev.target.value === 'none') { this._autoResetActive = false; }
           this._updateAutoResetUI();
+          this._scheduleAutoReset();
           this._saveAutoState();
         }
       }
@@ -594,6 +613,7 @@ class BmsBatteryCardV5 extends HTMLElement {
 
     this._initialized = true;
     this._loadAutoState();
+    this._scheduleAutoReset();
     this._updateAutoResetUI();
     this._setupManualResetBtn();
     this._startFlow();
@@ -1622,9 +1642,6 @@ class BmsBatteryCardV5 extends HTMLElement {
       this._set('ft-ein',  eIn  !== null ? `${eIn.toFixed(3)}<span style="font-size:9px;color:var(--txt2)"> kWh</span>` : '--');
     if (this._has('energy_out'))
       this._set('ft-eout', eOut !== null ? `${eOut.toFixed(3)}<span style="font-size:9px;color:var(--txt2)"> kWh</span>` : '--');
-
-    // ── Auto reset check ─────────────────────────────────────────────────
-    this._checkAutoReset();
 
     // ── Status bar ────────────────────────────────────────────────────────
     const warnStr = this._state(e.errors);

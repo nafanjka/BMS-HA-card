@@ -580,6 +580,20 @@ class BmsBatteryCardV5 extends HTMLElement {
 
       // Manual reset — handled by long-press listener, not click
 
+      // Chart period tab
+      const ctab = ev.target.closest('.ctab');
+      if (ctab && ctab.dataset.chartH) {
+        const h = parseInt(ctab.dataset.chartH);
+        if (h && h !== this._chartHours) {
+          this._chartHours = h;
+          this._chartFetchedAt = 0;
+          this.shadowRoot.querySelectorAll('.ctab').forEach(b =>
+            b.classList.toggle('active', parseInt(b.dataset.chartH) === h));
+          this._fetchChartHistory();
+        }
+        return;
+      }
+
       // Tap-to-history — any tile with data-tap-entity (skip switch chips, already handled above)
       const tappable = ev.target.closest('[data-tap-entity]');
       if (tappable && !tappable.classList.contains('sw-chip')) {
@@ -813,12 +827,15 @@ class BmsBatteryCardV5 extends HTMLElement {
     hGrid += `<line x1="${PL}" y1="${(ZY+hOff)}" x2="${PL+PW}" y2="${(ZY+hOff)}" stroke="rgba(255,255,255,0.035)" stroke-width="0.5" stroke-dasharray="3,6"/>`;
 
     // Vertical grid + x-axis labels
-    const stepH = totalH<=12 ? 2 : totalH<=24 ? 4 : 8;
+    const stepH = totalH<=12 ? 2 : totalH<=24 ? 4 : totalH<=48 ? 8 : totalH<=72 ? 12 : 24;
+    const DAYS  = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
     let vGrid='', xLabels='';
     for (let h=0; h<=totalH; h+=stepH) {
       const x     = (PL + (h/totalH)*PW).toFixed(1);
       const t     = new Date(startMs + h*3600000);
-      const lbl   = `${t.getHours().toString().padStart(2,'0')}:00`;
+      const lbl   = totalH >= 120
+        ? DAYS[t.getDay()]
+        : `${t.getHours().toString().padStart(2,'0')}:00`;
       const isNow = h === totalH;
       vGrid   += `<line x1="${x}" y1="${PT}" x2="${x}" y2="${VH-PB}" stroke="rgba(255,255,255,0.045)" stroke-width="0.5"/>`;
       xLabels += `<text x="${x}" y="${VH-5}" text-anchor="middle" fill="${isNow?'rgba(255,255,255,0.40)':'rgba(255,255,255,0.20)'}" font-size="7" font-family="Inter,system-ui,sans-serif">${lbl}</text>`;
@@ -967,7 +984,11 @@ class BmsBatteryCardV5 extends HTMLElement {
       const idx = Math.min(N-1, Math.max(0, Math.round((svgX - PL) / PW * (N-1))));
       const px  = toX(idx), py = pPts[idx][1], cy = cPts[idx][1];
       const t   = new Date(startMs + idx * bucketMs);
-      const ts  = `${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}`;
+      const ts  = totalH >= 120
+        ? `${DAYS[t.getDay()]} ${t.getHours().toString().padStart(2,'0')}:00`
+        : totalH >= 48
+          ? `${t.getHours().toString().padStart(2,'0')}:00`
+          : `${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}`;
       const pv  = power[idx], cv = current[idx];
       const ps  = (pv >= 0 ? '+' : '') + Math.round(pv) + ' W';
       const cs  = (cv >= 0 ? '+' : '') + (cv >= 10 ? Math.round(cv) : cv.toFixed(1)) + ' A';
@@ -1203,7 +1224,7 @@ class BmsBatteryCardV5 extends HTMLElement {
     .fn-val { font-size:15px; font-weight:800; line-height:1; margin-bottom:2px; }
     .fn-lbl { font-size:8px; color:var(--txt3); text-transform:uppercase; letter-spacing:.4px; }
 
-    /* ── 24h chart ── */
+    /* ── History chart ── */
     .chart-section {
       margin:8px 0 12px;
       padding:10px 12px 8px;
@@ -1213,9 +1234,19 @@ class BmsBatteryCardV5 extends HTMLElement {
       box-shadow:0 6px 28px rgba(0,0,0,0.50), inset 0 1px 0 rgba(255,255,255,0.07);
     }
     .chart-hdr {
-      display:flex; align-items:center; justify-content:space-between; margin-bottom:5px;
+      display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;
     }
-    .chart-legend { display:flex; gap:14px; align-items:center; }
+    .chart-tabs { display:flex; gap:2px; align-items:center; }
+    .ctab {
+      padding:3px 7px; border-radius:8px; border:1px solid var(--brd2);
+      background:transparent; color:var(--txt3); font-size:8px; font-weight:700;
+      letter-spacing:.4px; text-transform:uppercase; cursor:pointer; transition:all .25s; white-space:nowrap;
+    }
+    .ctab.active {
+      background:rgba(102,187,106,.14); border-color:rgba(102,187,106,.50);
+      color:#66bb6a; box-shadow:0 0 8px rgba(102,187,106,.10);
+    }
+    .chart-legend { display:flex; gap:10px; align-items:center; margin-bottom:4px; }
     .chart-legend-pow,
     .chart-legend-cur { display:flex; align-items:center; gap:5px; font-size:9px; }
     .chart-legend-pow { color:rgba(102,187,106,0.90); }
@@ -1731,11 +1762,17 @@ class BmsBatteryCardV5 extends HTMLElement {
         ${(e.current || e.power) ? `
         <div class="chart-section">
           <div class="chart-hdr">
-            <span class="sec-lbl" style="margin:0">📈 ${this._chartHours ?? 24}h History</span>
-            <div class="chart-legend">
-              <span class="chart-legend-pow">— Power (W)</span>
-              <span class="chart-legend-cur">— Current (A)</span>
+            <span class="sec-lbl" style="margin:0">📈 History</span>
+            <div class="chart-tabs">
+              ${[12,24,48,72,168].map(h => {
+                const lbl = h === 168 ? '1w' : `${h}h`;
+                return `<button class="ctab${(this._chartHours??24)===h?' active':''}" data-chart-h="${h}">${lbl}</button>`;
+              }).join('')}
             </div>
+          </div>
+          <div class="chart-legend">
+            <span class="chart-legend-pow">Power (W)</span>
+            <span class="chart-legend-cur">Current (A)</span>
           </div>
           <svg id="chart-svg" class="chart-svg" viewBox="0 0 400 130"></svg>
         </div>` : ''}

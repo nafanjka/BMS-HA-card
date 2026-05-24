@@ -24,7 +24,6 @@ class BmsBatteryCardV5 extends HTMLElement {
     this._lastChangeTime  = null;
     this._autoResetActive = false;
     this._autoResetMode   = 'none';
-    this._autoResetTimer  = null;
     this._visibilityHandler = null;
     this._hasSynced = false;
     this._chartData       = null;
@@ -35,7 +34,6 @@ class BmsBatteryCardV5 extends HTMLElement {
   disconnectedCallback() {
     if (this._flowRaf) cancelAnimationFrame(this._flowRaf);
     if (this._visibilityHandler) document.removeEventListener('visibilitychange', this._visibilityHandler);
-    if (this._autoResetTimer) { clearTimeout(this._autoResetTimer); this._autoResetTimer = null; }
   }
 
   static getStubConfig() {
@@ -446,7 +444,7 @@ class BmsBatteryCardV5 extends HTMLElement {
         this._autoResetActive = !!d.active;
         this._autoResetMode   = d.mode || 'none';
         this._updateAutoResetUI();
-        this._scheduleAutoReset();
+        this._syncHAAutomation();
         // Refresh localStorage cache so next paint is instant
         try { localStorage.setItem(this._uiStateKey(), JSON.stringify({ active: this._autoResetActive, mode: this._autoResetMode })); } catch {}
       }
@@ -487,22 +485,40 @@ class BmsBatteryCardV5 extends HTMLElement {
     return null;
   }
 
-  _scheduleAutoReset() {
-    // Cancel any existing timer so re-scheduling is idempotent.
-    if (this._autoResetTimer) { clearTimeout(this._autoResetTimer); this._autoResetTimer = null; }
-    if (!this._autoResetActive || this._autoResetMode === 'none') return;
+  _autoId() {
+    return `bms_autoreset_${(this._config.title || 'default').replace(/\W+/g, '_').toLowerCase()}`;
+  }
 
-    const next = this._nextResetTime();
-    if (!next) return;
-    const msUntilNext = next.getTime() - Date.now();
-    // Clamp to at least 1 s to avoid degenerate zero-delay loops.
-    this._autoResetTimer = setTimeout(() => {
-      this._autoResetTimer = null;
-      this._performReset();
-      try { localStorage.setItem(this._storageKey(), new Date().toISOString()); } catch {}
-      // Reschedule for the NEXT period.
-      this._scheduleAutoReset();
-    }, Math.max(1000, msUntilNext));
+  async _syncHAAutomation() {
+    if (!this._hass || typeof this._hass.callApi !== 'function') return;
+    const eid = (this._config.entities || {}).energy_clear_btn;
+    if (!eid) return;
+
+    const path = `config/automation/config/${this._autoId()}`;
+
+    if (!this._autoResetActive || this._autoResetMode === 'none') {
+      try { await this._hass.callApi('DELETE', path); } catch {}
+      return;
+    }
+
+    const condition = this._autoResetMode === 'weekly'
+      ? [{ condition: 'time', weekday: ['mon'] }]
+      : this._autoResetMode === 'monthly'
+      ? [{ condition: 'template', value_template: '{{ now().day == 1 }}' }]
+      : [];
+
+    try {
+      await this._hass.callApi('POST', path, {
+        alias: `BMS Auto-Reset — ${this._config.title || 'Battery'}`,
+        description: 'Managed by BMS Battery Card v5',
+        trigger: [{ platform: 'time', at: '00:00:00' }],
+        condition,
+        action: [{ service: 'button.press', target: { entity_id: eid } }],
+        mode: 'single'
+      });
+    } catch (err) {
+      console.warn('[BMS] Could not create HA automation:', err);
+    }
   }
 
   _performReset() {
@@ -614,12 +630,9 @@ class BmsBatteryCardV5 extends HTMLElement {
         this._autoResetActive = !this._autoResetActive;
         if (this._autoResetActive) {
           this._autoResetMode = mode;
-          // Seed last-reset to NOW so the first fire happens at the NEXT threshold,
-          // not immediately because today's/this-week's midnight is already in the past.
-          try { localStorage.setItem(this._storageKey(), new Date().toISOString()); } catch {}
         }
         this._updateAutoResetUI();
-        this._scheduleAutoReset();
+        this._syncHAAutomation();
         this._saveAutoState();
         return;
       }
@@ -634,7 +647,7 @@ class BmsBatteryCardV5 extends HTMLElement {
           this._autoResetMode = ev.target.value;
           if (ev.target.value === 'none') { this._autoResetActive = false; }
           this._updateAutoResetUI();
-          this._scheduleAutoReset();
+          this._syncHAAutomation();
           this._saveAutoState();
         }
       }
@@ -642,7 +655,7 @@ class BmsBatteryCardV5 extends HTMLElement {
 
     this._initialized = true;
     this._loadAutoState();
-    this._scheduleAutoReset();
+    this._syncHAAutomation();
     this._updateAutoResetUI();
     this._setupManualResetBtn();
     this._startFlow();
@@ -1069,6 +1082,7 @@ class BmsBatteryCardV5 extends HTMLElement {
       animation:chargingBadgePulse 2.2s ease-in-out infinite;
     }
     .charging-badge.visible { display:flex; align-items:center; }
+    .status-slot { display:flex; align-items:center; }
 
     /* Accent bar */
     .accent {
@@ -1682,8 +1696,10 @@ class BmsBatteryCardV5 extends HTMLElement {
               <div class="t-sub" id="conn-label">JK BMS <span id="conn-dot" class="conn-dot live">●</span><span id="conn-txt"> Live</span></div>
             </div>
           </div>
-          <div class="charging-badge" id="charging-badge">⚡ CHARGING</div>
-          <div class="pill pill-idle" id="status-pill">⏸ Idle</div>
+          <div class="status-slot">
+            <div class="charging-badge" id="charging-badge">⚡ CHARGING</div>
+            <div class="pill pill-idle" id="status-pill">⏸ Idle</div>
+          </div>
         </div>
 
         <div class="hero">
